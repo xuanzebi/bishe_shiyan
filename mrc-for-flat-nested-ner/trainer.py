@@ -300,10 +300,10 @@ class BertLabeling(pl.LightningModule):
             end_preds.extend(x['end_preds'].detach().cpu().numpy().tolist())
         
         with codecs.open(self.result_dir + '/testdata_start_preds.json','w',encoding='utf-8') as fw:
-            json.dump(start_preds,fw,indent=2,ensure_ascii=False)
+            json.dump(start_preds,fw,ensure_ascii=False)
         
         with codecs.open(self.result_dir + '/testdata_end_preds.json','w',encoding='utf-8') as fw:
-            json.dump(end_preds,fw,indent=2,ensure_ascii=False)
+            json.dump(end_preds,fw,ensure_ascii=False)
         
         return {'val_loss': avg_loss,
                  'log': tensorboard_logs
