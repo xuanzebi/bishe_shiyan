@@ -45,3 +45,19 @@ class BertCRFForNER(BertPreTrainedModel):
         total_loss = self.crf.neg_log_likelihood_loss(logits, attention_mask, labels)
         scores, tag_seq = self.crf._viterbi_decode(logits, attention_mask)
         return total_loss / batch_size, tag_seq
+
+class BertQueryNER(BertPreTrainedModel):
+    def __init__(self, config):
+        super(BertQueryNER, self).__init__(config)
+        self.bert = BertModel(config)
+        self.start_outputs = nn.Linear(config.hidden_size, 1)
+        self.end_outputs = nn.Linear(config.hidden_size, 1)
+
+        self.span_embedding = nn.Sequential(
+            nn.Linear(config.hidden_size, config.hidden_size),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(config.hidden_size, 6)
+        )
+
+
