@@ -27,8 +27,8 @@ def evaluate(ckpt, hparams_file):
 
 if __name__ == '__main__':
 
-    CHECKPOINTS = "/opt/hyp/NER/Cysecurity_pretrain/mrc-for-flat-nested-ner/result/lr5e-5_dropout0.2_acgb2/epoch=9_v0.ckpt"
-    HPARAMS = "/opt/hyp/NER/Cysecurity_pretrain/mrc-for-flat-nested-ner/result/lr5e-5_dropout0.2_acgb2/lightning_logs/version_0/hparams.yaml"
+    CHECKPOINTS = "/opt/hyp/NER/Cysecurity_pretrain/mrc-for-flat-nested-ner/result/epoch40_lr5e-5_dropout0.2_acgb4/epoch=39_v0.ckpt"
+    HPARAMS = "/opt/hyp/NER/Cysecurity_pretrain/mrc-for-flat-nested-ner/result/epoch40_lr5e-5_dropout0.2_acgb4/lightning_logs/version_0/hparams.yaml"
 
     evaluate(ckpt=CHECKPOINTS, hparams_file=HPARAMS)
 

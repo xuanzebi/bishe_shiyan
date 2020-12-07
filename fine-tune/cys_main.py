@@ -45,12 +45,13 @@ sys.path.insert(0, package_dir)
 import warnings
 warnings.filterwarnings("ignore")
 
-# import os
-# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 from util import get_logger, compute_spans_bio, compute_spans_bieos, compute_instance_f1,compute_f1
 from utils_ner import convert_examples_to_features, read_examples_from_file, get_labels
-from model import BertCRFForNER
+from model import BertCRFForNER,BertForNER
+from dice_loss import SelfAdjDiceLoss
 
 def str2bool(v):
     if isinstance(v, bool):
@@ -77,7 +78,7 @@ def evaluate_entity(y_true, y_pred, tag):
     metric = compute_f1(gold_sentences, pred_sentences)
     return metric
 
-def evaluate(data, model, label_map, tag, args, train_logger, device, dev_test_data, mode, pad_token_label_id):
+def evaluate(data, model, label_map, tag, args, train_logger, device, mode, pad_token_label_id,epoch):
     print("Evaluating on {} set...".format(mode))
     test_iterator = tqdm(data, desc="dev_test_interation")
     preds = None
@@ -122,14 +123,14 @@ def evaluate(data, model, label_map, tag, args, train_logger, device, dev_test_d
     metric_instance = evaluate_instance(out_label_list, preds_list)
     metric = evaluate_entity(out_label_list, preds_list, tag)
     metric['test_loss'] = test_loss / nb_eval_steps
-
+    metric['epoch'] = epoch
     if mode == 'test':
         return metric, metric_instance, preds_list
     else:
         return metric, metric_instance
 
 
-def train(model, train_dataloader, dev_dataloader, args, device, tb_writer, label_map, tag, train_logger,
+def train(model, train_dataloader, dev_dataloader, test_dataloader,args, device, tb_writer, label_map, tag, train_logger,
           dev_test_data, pad_token_label_id):
     # param_lrs = [{'params': param, 'lr': lr} for param in model.parameters()]
     train_loss_step = {}
@@ -155,9 +156,10 @@ def train(model, train_dataloader, dev_dataloader, args, device, tb_writer, labe
         optimizer, num_warmup_steps=warmup_steps, num_training_steps=t_total
     )
 
-    test_result = []
-    test_result_instance = []
+    dev_result,test_result = [],[]
+    dev_result_instance = []
     bestscore, best_epoch = -1, 0
+    test_bestscore,test_best_epoch = -1,0
     bestscore_instance, best_epoch_instance = -1, 0
     # save_model_list = [0,0,0,0,0]
     tr_loss, logging_loss = 0.0, 0.0
@@ -204,7 +206,10 @@ def train(model, train_dataloader, dev_dataloader, args, device, tb_writer, labe
 
         train_loss_epoch[epoch] = avg_loss
         metric, metric_instance = evaluate(dev_dataloader, model, label_map, tag, args, train_logger, device,
-                                            dev_test_data, 'dev', pad_token_label_id)
+                                            'dev', pad_token_label_id,epoch)
+        
+        test_metric, test_metric_instance = evaluate(test_dataloader, model, label_map, tag, args, train_logger, device,
+                                    'dev', pad_token_label_id,epoch)
             
         metric_instance['epoch'] = epoch
         metric['epoch'] = epoch
@@ -225,6 +230,9 @@ def train(model, train_dataloader, dev_dataloader, args, device, tb_writer, labe
             # model_to_save.save_pretrained(args.model_save_dir)
             # tokenizer.save_pretrained(args.model_save_dir)
 
+        if test_metric['micro-f1'] > test_bestscore:
+            test_bestscore = test_metric['micro-f1']
+            test_best_epoch = epoch
         # releax-f1 token-level f1
         # if metric_instance['micro-f1'] > bestscore_instance:
         #     bestscore_instance = metric_instance['micro-f1']
@@ -244,15 +252,23 @@ def train(model, train_dataloader, dev_dataloader, args, device, tb_writer, labe
         train_logger.info('epoch:{} P:{}, R:{}, F1:{},best F1:{}! "\n"'.format(epoch, metric['precision-overall'], metric['recall-overall'],
                                                                      metric['f1-measure-overall'], bestscore))
 
-        test_result.append(metric)
-        test_result_instance.append(metric_instance)
+        print('Test: epoch:{} P:{}, R:{}, F1:{},best F1:{}!!"\n"'.format(epoch, test_metric['precision-overall'],test_metric['recall-overall'],
+                                                                         test_metric['f1-measure-overall'],test_bestscore))
+        train_logger.info('Test: epoch:{} P:{}, R:{}, F1:{},best F1:{}!! "\n"'.format(epoch, test_metric['precision-overall'], test_metric['recall-overall'],
+                                                                     test_metric['f1-measure-overall'],test_bestscore))                                                            
 
-    test_result.append({'best_dev_f1': bestscore,
+        dev_result.append(metric)
+        test_result.append(test_metric)
+        dev_result_instance.append(metric_instance)
+
+    dev_result.append({'best_dev_f1': bestscore,
                         'best_dev_epoch': best_epoch})
-    test_result_instance.append({'best_dev_f1': bestscore_instance,
+    test_result.append({'best_test_f1': test_bestscore,
+                        'best_test_epoch': test_best_epoch})
+    dev_result_instance.append({'best_dev_f1': bestscore_instance,
                                  'best_dev_epoch': best_epoch_instance})
     tb_writer.close()
-    return test_result, test_result_instance, lr, train_loss_step, train_loss_epoch,dev_loss_epoch
+    return test_result, dev_result, dev_result_instance, lr, train_loss_step, train_loss_epoch,dev_loss_epoch
 
 def save_config(config, path, verbose=True):
     with open(path, 'w', encoding='utf-8') as outfile:
@@ -391,10 +407,16 @@ if __name__ == "__main__":
     index2label = {j: i for i, j in label2index.items()}
     args.label = label2index
 
+    use_dice_loss = True
+
     if args.use_crf:
         pad_token_label_id = 0
     else:
-        pad_token_label_id = CrossEntropyLoss().ignore_index
+        if use_dice_loss:
+            pad_token_label_id = 0
+        else:
+            pad_token_label_id = CrossEntropyLoss().ignore_index
+        
 
     # MODEL
     # args.model_type = args.model_type.lower()
@@ -413,7 +435,10 @@ if __name__ == "__main__":
         if args.use_crf:
             model = BertCRFForNER.from_pretrained(args.model_name_or_path, config=config)
         else:
-            model = BertForTokenClassification.from_pretrained(args.model_name_or_path, config=config)
+            if use_dice_loss:
+                model = BertForNER.from_pretrained(args.model_name_or_path, config=config)
+            else:
+                model = BertForTokenClassification.from_pretrained(args.model_name_or_path, config=config)
 
         if args.use_dataParallel:
             model = nn.DataParallel(model.cuda())
@@ -423,16 +448,22 @@ if __name__ == "__main__":
         train_dataset = load_and_cache_examples(train_data_raw, args, tokenizer, label2index, pad_token_label_id, 'train', train_logger)
         dev_dataset = load_and_cache_examples(dev_data_raw, args, tokenizer, label2index, pad_token_label_id, 'dev',train_logger)
 
+        test_dataset = load_and_cache_examples(test_data_raw, args, tokenizer, label2index, pad_token_label_id, 'test',train_logger)
+        test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size)
+
         train_sampler = RandomSampler(train_dataset)
         train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.batch_size)
         dev_dataloader = DataLoader(dev_dataset, batch_size=args.batch_size)
 
-        dev_result, dev_result_instance, lr, train_loss_step, train_loss_epoch,dev_loss_epoch = train(model, train_dataloader, dev_dataloader, args, device, tb_writer, \
+        test_result,dev_result, dev_result_instance, lr, train_loss_step, train_loss_epoch,dev_loss_epoch = train(model, train_dataloader, dev_dataloader, test_dataloader,args, device, tb_writer, \
                                                     index2label, tag, train_logger, dev_data_raw, pad_token_label_id)
 
         # Result and save
         with codecs.open(result_dir + '/dev_result.txt', 'w', encoding='utf-8') as f:
             json.dump(dev_result, f, indent=4, ensure_ascii=False)
+
+        with codecs.open(result_dir + '/test_result.txt', 'w', encoding='utf-8') as f:
+            json.dump(test_result, f, indent=4, ensure_ascii=False)
 
         # with codecs.open(result_dir + '/dev_result_instance.txt', 'w', encoding='utf-8') as f:
         #     json.dump(dev_result_instance, f, indent=4, ensure_ascii=False)
@@ -467,7 +498,10 @@ if __name__ == "__main__":
         if args.use_crf:
             model = BertCRFForNER.from_pretrained(entity_model_save_dir, config=config)
         else:
-            model = BertForTokenClassification.from_pretrained(entity_model_save_dir, config=config)
+            if use_dice_loss:
+                model = BertForNER.from_pretrained(args.model_name_or_path, config=config)
+            else:
+                model = BertForTokenClassification.from_pretrained(entity_model_save_dir, config=config)
 
         model = model.to(device)
         # 如果命名不是pytorch_model.bin的话，需要load_state_dict
@@ -477,8 +511,8 @@ if __name__ == "__main__":
         if args.use_dataParallel:
             model = nn.DataParallel(model.cuda())
         # Result and save
-        entity_metric, entity_metric_instance, y_pred_entity = evaluate(test_dataloader, model, index2label, tag, args, train_logger, device, test_data_raw, 'test',
-                                            pad_token_label_id)
+        entity_metric, entity_metric_instance, y_pred_entity = evaluate(test_dataloader, model, index2label, tag, args, train_logger, device, 'test',
+                                            pad_token_label_id,-1)
         end_time = time.time()
         print('预测Time Cost:{}s'.format(end_time - start_time))
         train_logger.info('预测Time Cost:{}s'.format(end_time - start_time))
