@@ -17,7 +17,7 @@ class SelfAdjDiceLoss(torch.nn.Module):
         - targets: `(N)` where each value is in [0, C - 1]
     """
 
-    def __init__(self, alpha: float = 1.0, gamma: float = 1.0, reduction: str = "mean") -> None:
+    def __init__(self, alpha: float = 0.6, gamma: float = 1.0, reduction: str = "mean") -> None:
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma

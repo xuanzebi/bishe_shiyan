@@ -253,15 +253,15 @@ def compute_nonspans(tags):
 
 
 def test_spans():
-    test = ['B-PER', 'B-PER', 'I-PER', 'O', 'B-PER',
-            'I-MISC', 'B-MISC', 'I-MISC', 'B-PER', 'I-PER']
-    span = compute_spans_bio(test)
-    print(span)
+    # test = ['B-PER', 'B-PER', 'I-PER', 'O', 'B-PER',
+    #         'I-MISC', 'B-MISC', 'I-MISC', 'B-PER', 'I-PER']
+    # span = compute_spans_bio(test)
+    # print(span)
 
-    test = ['S-PER', 'O', 'B-MISC', 'I-MISC',
+    test = ['I-PER', 'O', 'B-MISC', 'I-MISC',
             'E-MISC', 'B-PER', 'E-PER', 'S-PER']
     print(compute_spans_bieos(test))
-    print(tag_to_spans(test))
+    # print(tag_to_spans(test))
 
     """
         计算F1样例 ['B-PER', 'E-PER', 'O', 'B-MISC', 'I-MISC', 'E-MISC', 'O'],  ['B-PER', 'E-PER', 'B-MISC', 'I-MISC', 'I-MISC', 'E-MISC', 'O']
@@ -272,17 +272,17 @@ def test_spans():
     y_pred = [['B-ORG', 'E-ORG', 'O', 'B-MISC', 'I-MISC', 'E-MISC', 'O'], ['B-PER', 'E-PER', 'B-MISC', 'I-MISC', 'I-MISC',
                                                                            'S-MISC', 'O']]
 
-    gold_sentences = [compute_nonspans(i) for i in y_true]
-    pred_sentences = [compute_nonspans(i) for i in y_pred]
-    print(gold_sentences)
-    print(pred_sentences)
+    # gold_sentences = [compute_nonspans(i) for i in y_true]
+    # pred_sentences = [compute_nonspans(i) for i in y_pred]
+    # print(gold_sentences)
+    # print(pred_sentences)
 
     # tags = ['B-MISC', 'E-MISC', 'S-MISC', 'B-PER', 'I-PER', 'I-PER', 'E-PER']
     # biotag = BIEOS2BIO(tags)
     # print(biotag)
     # print(to_bioes(biotag))
 
-
+# test_spans()
 
 def compute_accuracy(gold_corpus, pred_corpus):
     assert len(gold_corpus) == len(pred_corpus) and len(gold_corpus) > 0

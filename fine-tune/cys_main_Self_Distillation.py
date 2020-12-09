@@ -51,7 +51,8 @@ warnings.filterwarnings("ignore")
 
 from util import get_logger, compute_spans_bio, compute_spans_bieos, compute_instance_f1,compute_f1
 from utils_ner import convert_examples_to_features, read_examples_from_file, get_labels
-from model import BertCRFForNER
+from model import BertCRFForNER,BertForNER
+from dice_loss import SelfAdjDiceLoss
 
 def str2bool(v):
     if isinstance(v, bool):
@@ -78,7 +79,7 @@ def evaluate_entity(y_true, y_pred, tag):
     metric = compute_f1(gold_sentences, pred_sentences)
     return metric
 
-def evaluate(data, model, label_map, tag, args, train_logger, device, mode, pad_token_label_id,epoch):
+def evaluate(data, model, label_map, tag, args, train_logger, device, mode, pad_token_label_id,epoch,raw_data):
     print("Evaluating on {} set...".format(mode))
     test_iterator = tqdm(data, desc="dev_test_interation")
     preds = None
@@ -114,11 +115,19 @@ def evaluate(data, model, label_map, tag, args, train_logger, device, mode, pad_
     out_label_list = [[] for _ in range(out_label_ids.shape[0])]
     preds_list = [[] for _ in range(out_label_ids.shape[0])]
 
-    for i in range(out_label_ids.shape[0]):
-        for j in range(out_label_ids.shape[1]):
-            if out_label_ids[i, j] != pad_token_label_id:
-                out_label_list[i].append(label_map[out_label_ids[i][j]])
-                preds_list[i].append(label_map[preds[i][j]])
+    if args.use_dice_loss:
+        raw_data_len = [len(line.split()) for line,la in raw_data]
+        for i in range(out_label_ids.shape[0]):
+            for j in range(out_label_ids.shape[1]):
+                if j != 0 and j <= raw_data_len[i]:
+                    out_label_list[i].append(label_map[out_label_ids[i][j]])
+                    preds_list[i].append(label_map[preds[i][j]])
+    else:
+        for i in range(out_label_ids.shape[0]):
+            for j in range(out_label_ids.shape[1]):
+                if out_label_ids[i, j] != pad_token_label_id:
+                    out_label_list[i].append(label_map[out_label_ids[i][j]])
+                    preds_list[i].append(label_map[preds[i][j]])
 
     metric_instance = evaluate_instance(out_label_list, preds_list)
     metric = evaluate_entity(out_label_list, preds_list, tag)
@@ -132,7 +141,7 @@ def evaluate(data, model, label_map, tag, args, train_logger, device, mode, pad_
 
 
 def train(model, train_dataloader, dev_dataloader, test_dataloader,args, device, tb_writer, label_map, tag, train_logger,
-          pad_token_label_id,kd_type):
+          pad_token_label_id,kd_type,dev_data_raw,test_data_raw):
     # param_lrs = [{'params': param, 'lr': lr} for param in model.parameters()]
     train_loss_step = {}
     train_loss_epoch = {}
@@ -295,10 +304,10 @@ def train(model, train_dataloader, dev_dataloader, test_dataloader,args, device,
 
         train_loss_epoch[epoch] = avg_loss
         metric, metric_instance = evaluate(dev_dataloader, model, label_map, tag, args, train_logger, device,
-                                            'dev', pad_token_label_id,epoch)
+                                            'dev', pad_token_label_id,epoch,dev_data_raw)
         
         test_metric, test_metric_instance = evaluate(test_dataloader, model, label_map, tag, args, train_logger, device,
-                            'dev', pad_token_label_id,epoch)
+                            'dev', pad_token_label_id,epoch,test_data_raw)
 
         metric_instance['epoch'] = epoch
         metric['epoch'] = epoch
@@ -313,15 +322,17 @@ def train(model, train_dataloader, dev_dataloader, test_dataloader,args, device,
             best_epoch = epoch
             print('实体级别的F1的best model epoch is: %d' % epoch)
             train_logger.info('实体级别的F1的best model epoch is: %d' % epoch)
-            model_name = args.model_save_dir + "/pytorch_model.bin"
-            model_to_save = (model.module if hasattr(model, "module") else model)
-            torch.save(model_to_save.state_dict(), model_name)
+
             # model_to_save.save_pretrained(args.model_save_dir)
             # tokenizer.save_pretrained(args.model_save_dir)
 
         if test_metric['micro-f1'] > test_bestscore:
             test_bestscore = test_metric['micro-f1']
             test_best_epoch = epoch
+            model_name = args.model_save_dir + "/pytorch_model.bin"
+            model_to_save = (model.module if hasattr(model, "module") else model)
+            torch.save(model_to_save.state_dict(), model_name)
+
         # releax-f1 token-level f1
         # if metric_instance['micro-f1'] > bestscore_instance:
         #     bestscore_instance = metric_instance['micro-f1']
@@ -419,7 +430,7 @@ if __name__ == "__main__":
     parser.add_argument('--model_save_dir', type=str, default='/opt/hyp/NER/Cysecurity_pretrain/fine-tune/save_models/cyber/test',help='Root dir for saving models.')
     parser.add_argument('--data_path', default='/opt/hyp/NER/NER-model/data/Cybersecurity/json_data', type=str,help='数据路径')
     parser.add_argument("--model_type", default='bert', type=str, help="Model type selected in the list")
-    parser.add_argument("--model_name_or_path", default='/opt/hyp/NER/embedding/bert/chinese_L-12_H-768_A-12_pytorch', type=str,
+    parser.add_argument("--model_name_or_path", default='/opt/hyp/NER/Cysecurity_pretrain/mlm_dapt/save_model/final_mlm_data_epoch_10_LR5e-5_BATCH_SIZE8_GAS8', type=str,
                         help="Path to pre-trained model or shortcut name selected in the list: ")
 
     parser.add_argument("--use_bieos", default=True, type=str2bool, help="True:BIEOS False:BIO")
@@ -430,10 +441,11 @@ if __name__ == "__main__":
     parser.add_argument('--use_dataParallel', default=False, type=str2bool, help='是否使用dataParallel并行训练')
     parser.add_argument('--use_scheduler', default=True, type=str2bool, help='学习率是否下降')
     parser.add_argument('--kd_type', default='sda_step', type=str, help='sda & sdv & sda_epoch & sda_step')
-    parser.add_argument('--sda_step_kd', default=1000, type=int, help='sda_step的蒸馏step数量,一个epoch=38200/batch_size * gradient_accumulation_steps')
+    parser.add_argument('--sda_step_kd', default=2000, type=int, help='sda_step的蒸馏step数量,一个epoch=38200/batch_size * gradient_accumulation_steps')
+    parser.add_argument('--use_dice_loss', default=True, type=str2bool, help='是否使用dice_loss')
 
     parser.add_argument("--learning_rate", default=5e-5, type=float, help="The initial learning rate for Adam.")
-    parser.add_argument("--num_train_epochs", default=10, type=int, help="Total number of training epochs to perform.")
+    parser.add_argument("--num_train_epochs", default=1, type=int, help="Total number of training epochs to perform.")
     parser.add_argument('--batch_size', type=int, default=16, help='Training batch size.')
     parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
     parser.add_argument('--seed', type=int, default=42)
@@ -502,7 +514,10 @@ if __name__ == "__main__":
     if args.use_crf:
         pad_token_label_id = 0
     else:
-        pad_token_label_id = CrossEntropyLoss().ignore_index
+        if args.use_dice_loss:
+            pad_token_label_id = 0
+        else:
+            pad_token_label_id = CrossEntropyLoss().ignore_index
 
     # MODEL
     # args.model_type = args.model_type.lower()
@@ -515,15 +530,16 @@ if __name__ == "__main__":
 
     tb_writer = SummaryWriter(args.tensorboard_dir)
     
-    kd_type = "sda_epoch" 
-
     if args.do_train:
         print('===============================开始训练================================')
         # Model 
         if args.use_crf:
             model = BertCRFForNER.from_pretrained(args.model_name_or_path, config=config)
         else:
-            model = BertForTokenClassification.from_pretrained(args.model_name_or_path, config=config)
+            if args.use_dice_loss:
+                model = BertForNER.from_pretrained(args.model_name_or_path, config=config)
+            else:
+                model = BertForTokenClassification.from_pretrained(args.model_name_or_path, config=config)
         if args.use_dataParallel:
             model = nn.DataParallel(model.cuda())
         model = model.to(device)
@@ -540,7 +556,7 @@ if __name__ == "__main__":
         dev_dataloader = DataLoader(dev_dataset, batch_size=args.batch_size)
 
         test_result, dev_result, dev_result_instance, lr, train_loss_step, train_loss_epoch,dev_loss_epoch = train(model, train_dataloader, dev_dataloader, test_dataloader,args, device, tb_writer, \
-                                                    index2label, tag, train_logger, pad_token_label_id, args.kd_type)
+                                                    index2label, tag, train_logger, pad_token_label_id, args.kd_type,dev_data_raw,test_data_raw)
 
         # Result and save
         with codecs.open(result_dir + '/dev_result.txt', 'w', encoding='utf-8') as f:
@@ -581,7 +597,10 @@ if __name__ == "__main__":
         if args.use_crf:
             model = BertCRFForNER.from_pretrained(entity_model_save_dir, config=config)
         else:
-            model = BertForTokenClassification.from_pretrained(entity_model_save_dir, config=config)
+            if args.use_dice_loss:
+                model = BertForNER.from_pretrained(args.model_name_or_path, config=config)
+            else:
+                model = BertForTokenClassification.from_pretrained(entity_model_save_dir, config=config)
 
         model = model.to(device)
         # 如果命名不是pytorch_model.bin的话，需要load_state_dict
@@ -592,7 +611,7 @@ if __name__ == "__main__":
             model = nn.DataParallel(model.cuda())
         # Result and save
         entity_metric, entity_metric_instance, y_pred_entity = evaluate(test_dataloader, model, index2label, tag, args, train_logger, device, 'test',
-                                            pad_token_label_id,-1)
+                                            pad_token_label_id,-1,test_data_raw)
         end_time = time.time()
         print('预测Time Cost:{}s'.format(end_time - start_time))
         train_logger.info('预测Time Cost:{}s'.format(end_time - start_time))
