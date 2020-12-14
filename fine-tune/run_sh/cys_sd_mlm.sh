@@ -1,13 +1,12 @@
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=1
 # chinese_L-12_H-768_A-12_pytorch  chinese_roberta_wwm_ext_pytorch  RoBERTa_zh_L12_PyTorch
-
 max_epoch=50 
-LR=5e-5
+LR=3e-5
 BATCH_SIZE=16
-sda_step_kd=1000
+sda_step_kd=2000
 alpha=1
 
-OUTPUT_DIR="/opt/hyp/NER/Cysecurity_pretrain/fine-tune/save_models/cyber/sda_step_mlm_cys_step${sda_step_kd}_alpha_1_epoch${max_epoch}_LR${LR}_BATCH_SIZE${BATCH_SIZE}/"
+OUTPUT_DIR="/opt/hyp/NER/Cysecurity_pretrain/fine-tune/save_models/cyber/dice_loss_sda_step_mlm_cys_step${sda_step_kd}_alpha_1_epoch${max_epoch}_LR${LR}_BATCH_SIZE${BATCH_SIZE}/"
 
 mkdir -p $OUTPUT_DIR
 
@@ -25,5 +24,6 @@ python ../cys_main_Self_Distillation.py  --model_save_dir=$OUTPUT_DIR \
                      --use_dataParallel=False \
                      --use_crf=False \
                      --kd_type='sda_step' \
+                     --use_dice_loss=True \
                      --sda_step_kd=$sda_step_kd \
-                     --warmup_proportion=0.03 \
+                     --warmup_proportion=0.02 \
