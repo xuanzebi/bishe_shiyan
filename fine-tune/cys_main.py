@@ -52,6 +52,7 @@ from util import get_logger, compute_spans_bio, compute_spans_bieos, compute_ins
 from utils_ner import convert_examples_to_features, read_examples_from_file, get_labels
 from model import BertCRFForNER,BertForNER
 from dice_loss import SelfAdjDiceLoss
+from distill_model import FewLayerBertForNER
 
 def str2bool(v):
     if isinstance(v, bool):
@@ -354,6 +355,8 @@ if __name__ == "__main__":
     parser.add_argument('--use_dataParallel', default=False, type=str2bool, help='是否使用dataParallel并行训练')
     parser.add_argument('--use_scheduler', default=True, type=str2bool, help='学习率是否下降')
     parser.add_argument('--use_dice_loss', default=True, type=str2bool, help='是否使用dice_loss')
+    parser.add_argument('--use_few_bert', default=True, type=str2bool, help='是否使用少层BERT')
+    parser.add_argument('--few_bertlayer_num', default=6, type=int, help='BERT的层数')
 
     parser.add_argument("--learning_rate", default=5e-5, type=float, help="The initial learning rate for Adam.")
     parser.add_argument("--num_train_epochs", default=10, type=int, help="Total number of training epochs to perform.")
@@ -444,14 +447,21 @@ if __name__ == "__main__":
 
     if args.do_train:
         print('===============================开始训练================================')
-        # Model 
-        if args.use_crf:
-            model = BertCRFForNER.from_pretrained(args.model_name_or_path, config=config)
-        else:
-            if args.use_dice_loss:
-                model = BertForNER.from_pretrained(args.model_name_or_path, config=config)
+        # Model
+        if args.use_few_bert:
+            # num_hidden_layers
+            config.num_hidden_layers = args.few_bertlayer_num  # 是用的BERT前几层进行的初始化
+            # config.output_attentions = True
+            # config.output_hidden_states = True
+            model = FewLayerBertForNER.from_pretrained(args.model_name_or_path, config=config)
+        else: 
+            if args.use_crf:
+                model = BertCRFForNER.from_pretrained(args.model_name_or_path, config=config)
             else:
-                model = BertForTokenClassification.from_pretrained(args.model_name_or_path, config=config)
+                if args.use_dice_loss:
+                    model = BertForNER.from_pretrained(args.model_name_or_path, config=config)
+                else:
+                    model = BertForTokenClassification.from_pretrained(args.model_name_or_path, config=config)
 
         if args.use_dataParallel:
             model = nn.DataParallel(model.cuda())
@@ -508,13 +518,17 @@ if __name__ == "__main__":
 
         # Model
         entity_model_save_dir = args.model_save_dir + '/pytorch_model.bin'
-        if args.use_crf:
-            model = BertCRFForNER.from_pretrained(entity_model_save_dir, config=config)
+        if args.use_few_bert:
+            config.num_hidden_layers = args.few_bertlayer_num
+            model = FewLayerBertForNER.from_pretrained(args.model_name_or_path, config=config)
         else:
-            if args.use_dice_loss:
-                model = BertForNER.from_pretrained(args.model_name_or_path, config=config)
+            if args.use_crf:
+                model = BertCRFForNER.from_pretrained(entity_model_save_dir, config=config)
             else:
-                model = BertForTokenClassification.from_pretrained(entity_model_save_dir, config=config)
+                if args.use_dice_loss:
+                    model = BertForNER.from_pretrained(args.model_name_or_path, config=config)
+                else:
+                    model = BertForTokenClassification.from_pretrained(entity_model_save_dir, config=config)
 
         model = model.to(device)
         # 如果命名不是pytorch_model.bin的话，需要load_state_dict

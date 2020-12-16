@@ -5,7 +5,8 @@ import os
 import random
 import numpy as np
 import pickle
-
+from torch.utils.data import TensorDataset, DataLoader, RandomSampler
+from utils_ner import convert_examples_to_features, read_examples_from_file, get_labels
 def str2bool(v):
     if isinstance(v, bool):
         return v
@@ -235,3 +236,31 @@ def get_bert_word2id(vocab_path):
             idx += 1
     
     return word2Idx
+
+
+
+
+def load_and_cache_examples(data, args, tokenizer, label2index, pad_token_label_id, mode, logger):
+    logger.info("Creating features from dataset file at %s", args.data_path)
+    examples = read_examples_from_file(data, mode)
+    features = convert_examples_to_features(
+        examples,
+        label2index,
+        args.max_seq_length,
+        tokenizer,
+        cls_token_at_end=False,
+        cls_token=tokenizer.cls_token,
+        cls_token_segment_id=0,
+        sep_token=tokenizer.sep_token,
+        sep_token_extra=bool(args.model_type in ["roberta"]),
+        pad_on_left=False,
+        pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
+        pad_token_segment_id=0,
+        pad_token_label_id=pad_token_label_id,
+    )
+    all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
+    all_input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long)
+    all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
+    all_label_ids = torch.tensor([f.label_ids for f in features], dtype=torch.long)
+    dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
+    return dataset
