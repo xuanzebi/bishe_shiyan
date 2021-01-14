@@ -512,7 +512,7 @@ if __name__ == "__main__":
     if args.do_test:
         print('=========================测试集==========================')
         print(args)
-        start_time = time.time()
+        
         test_dataset = load_and_cache_examples(test_data_raw, args, tokenizer, label2index, pad_token_label_id, 'test',train_logger)
         test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size)
 
@@ -538,6 +538,7 @@ if __name__ == "__main__":
         if args.use_dataParallel:
             model = nn.DataParallel(model.cuda())
         # Result and save
+        start_time = time.time()
         entity_metric, entity_metric_instance, y_pred_entity = evaluate(test_dataloader, model, index2label, tag, args, train_logger, device, 'test',
                                             pad_token_label_id,-1,test_data_raw)
         end_time = time.time()

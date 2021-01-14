@@ -163,7 +163,6 @@ class FewLayerBertForNER(BertPreTrainedModel):
         )
 
         sequence_output = outputs[0]
-
         sequence_output = self.dropout(sequence_output)
         logits = self.classifier(sequence_output)
 

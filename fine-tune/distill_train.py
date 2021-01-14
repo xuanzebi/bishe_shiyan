@@ -294,7 +294,7 @@ if __name__ == "__main__":
     parser.add_argument('--use_packpad', default=False, type=str2bool, help='是否使用packed_pad')
     parser.add_argument('--loss_func', default='mse', type=str, help='mse/ce')
     parser.add_argument('--loss_func_alpha', default=1, type=float, help='蒸馏loss的权重')
-    parser.add_argument('--use_distill', default=True, type=str2bool, help='是否使用蒸馏')
+    parser.add_argument('--use_distill', default=False, type=str2bool, help='是否使用蒸馏')
     parser.add_argument('--temperature', default=1, type=int, help='蒸馏temperature')
 
     parser.add_argument("--learning_rate", default=0.015, type=float, help="The initial learning rate for Adam.")
@@ -399,6 +399,12 @@ if __name__ == "__main__":
             student_model = nn.DataParallel(student_model.cuda())
         student_model = student_model.to(device)
 
+        total_params = sum(p.numel() for p in student_model.parameters())
+        print(f'{total_params:,} total parameters.')
+        total_trainable_params = sum(
+        p.numel() for p in student_model.parameters() if p.requires_grad)
+        print(f'{total_trainable_params:,} training parameters.')
+
         teacher_model = []
         if args.use_distill:
             t_model = get_teacher_model(args,'/opt/hyp/NER/embedding/bert/chinese_L-12_H-768_A-12_pytorch',
@@ -436,7 +442,6 @@ if __name__ == "__main__":
     
     if args.do_test:
         print('=========================测试集==========================')
-        start_time = time.time()
         test_model = Bilstm(args, pretrain_word_embedding, len(label2index))
         if args.use_dataParallel:
             test_model = nn.DataParallel(test_model.cuda())
@@ -444,8 +449,8 @@ if __name__ == "__main__":
         entity_model_save_dir = args.model_save_dir + 'entity_best.pt'
 
         test_model.load_state_dict(torch.load(entity_model_save_dir))
+        start_time = time.time()
         test_metric, y_pred = evaluate(test_dataloader, test_model, index2label, tag, args, train_logger, device, 'test',-1,test_data_raw)
-
         end_time = time.time()
         print('预测Time Cost:{}s'.format(end_time - start_time))
         train_logger.info('预测Time Cost:{}s'.format(end_time - start_time))

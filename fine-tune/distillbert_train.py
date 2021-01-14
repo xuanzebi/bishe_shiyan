@@ -44,14 +44,14 @@ sys.path.insert(0, package_dir)
 import warnings
 warnings.filterwarnings("ignore")
 
-import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+# import os
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 from util import get_logger, compute_spans_bio, compute_spans_bieos, compute_instance_f1,compute_f1
 from utils_ner import get_labels
 
 from dice_loss import SelfAdjDiceLoss
-from distill_loss import kd_mse_loss,kd_ce_loss
+from distill_loss import kd_mse_loss,kd_ce_loss,hid_mse_loss,mmd_loss,patience_loss
 from distill_util import str2bool,save_config,seed_everything,get_cyber_data,get_bert_word2id,load_and_cache_examples
 from distill_model import Bilstm,get_teacher_model,FewLayerBertForNER
 
@@ -79,8 +79,12 @@ def evaluate(data, model, label_map, tag, args, train_logger, device, mode,epoch
         _test_batch = tuple(t.to(device) for t in test_batch)
         with torch.no_grad():
             _batch = tuple(t.to(device) for t in test_batch)
-            input_ids, input_mask, label_ids = _batch
-            loss, logits = model(input_ids, input_mask, labels=label_ids)
+            input_ids, input_mask, segment_ids, label_ids = _batch
+            if args.use_hidden_loss:
+                loss, logits, _ = model(input_ids, input_mask, segment_ids, labels=label_ids)
+            else:
+                loss, logits = model(input_ids, input_mask, segment_ids, labels=label_ids)
+
         nb_eval_steps += 1
         if args.use_dataParallel:
             loss = torch.sum(loss)  # if DataParallel model.module
@@ -165,22 +169,60 @@ def train(teacher_model: list,student_model,train_dataloader, dev_dataloader, te
             student_model.zero_grad()
             _batch = tuple(t.to(device) for t in batch)
             input_ids, input_mask, segment_ids, label_ids = _batch
-            loss, s_logits = student_model(input_ids, input_mask, segment_ids, labels=label_ids)
+            if args.use_hidden_loss:
+                loss, s_logits,s_encode_output = student_model(input_ids, input_mask, segment_ids, labels=label_ids)
+            else:
+                loss, s_logits = student_model(input_ids, input_mask, segment_ids, labels=label_ids)
             custom_loss = loss.item()
             # 蒸馏
             if len(teacher_model) > 0 :
-                t_logits = torch.zeros_like(s_logits)
-                for t_model in teacher_model:
-                    t_model = t_model.to(device)
-                    t_logit = t_model(input_ids, input_mask, segment_ids, labels=label_ids)[1]
-                    t_logits += t_logit
-                t_logits = t_logits / len(teacher_model)
-                if args.loss_func == 'mse':
-                    loss_t_s = kd_mse_loss(s_logits,t_logits,temperature=args.temperature)
-                elif args.loss_func == 'ce':
-                    loss_t_s = kd_ce_loss(s_logits,t_logits,temperature=args.temperature)
-                loss += loss_t_s * args.loss_func_alpha
+                if args.use_hidden_loss:
+                    hidden_loss_item = 0
+                    t_logits = torch.zeros_like(s_logits)
+                    hidden_t = [torch.zeros(args.batch_size,args.max_seq_length,768).to(device) for _ in range(13)]
+                    for t_model in teacher_model:
+                        t_model = t_model.to(device)
+                        t_model_output = t_model(input_ids, input_mask, segment_ids, labels=label_ids)
+                        t_logit = t_model_output[1]
+                        t_logits += t_logit
+                        encoder_outputs = t_model_output[2]
+                        assert len(hidden_t) == len(encoder_outputs)
+                        for i in range(len(hidden_t)):
+                            hidden_t[i] = hidden_t[i] + encoder_outputs[i] 
+                    
+                    hidden_t = [hid / len(teacher_model) for hid in hidden_t]
+                    # T3 ->  : 5 10 -> 1 2  or 10 11 -> 1 2  0层是embedding输出的，还没过bert layer
+                    # T4 -> 9 10 11 -> 1 2 3       没有加12 是因为12层输出已经用做softmax计算loss了
+                    t_s_adapt = {'0':0, '3':1,'6':2,'9':3}
+                    # hid_mse_loss  patience_loss  mmd_loss
+                    for t_l, s_l in t_s_adapt.items():
+                        hidden_s = s_encode_output[int(s_l)]
+                        t_hidden = hidden_t[int(t_l)]
+                        hidden_loss = hid_mse_loss(hidden_s,t_hidden,input_mask)
+                        hidden_loss_item += hidden_loss.item()
+                        loss += args.loss_func_beta * hidden_loss
+                        loss += mmd_loss([hidden_s,hidden_s],[t_hidden,t_hidden],input_mask)
 
+                    t_logits = t_logits / len(teacher_model)
+                    if args.loss_func == 'mse':
+                        loss_t_s = kd_mse_loss(s_logits,t_logits,temperature=args.temperature)
+                    elif args.loss_func == 'ce':
+                        loss_t_s = kd_ce_loss(s_logits,t_logits,temperature=args.temperature)
+
+                    loss += loss_t_s * args.loss_func_alpha
+                else:
+                    t_logits = torch.zeros_like(s_logits)
+                    for t_model in teacher_model:
+                        t_model = t_model.to(device)
+                        t_logit = t_model(input_ids, input_mask, segment_ids, labels=label_ids)[1]
+                        t_logits += t_logit
+                    t_logits = t_logits / len(teacher_model)
+                    if args.loss_func == 'mse':
+                        loss_t_s = kd_mse_loss(s_logits,t_logits,temperature=args.temperature)
+                    elif args.loss_func == 'ce':
+                        loss_t_s = kd_ce_loss(s_logits,t_logits,temperature=args.temperature)
+                    loss += loss_t_s * args.loss_func_alpha
+                  
             loss.backward()
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 torch.nn.utils.clip_grad_norm_(student_model.parameters(), args.max_grad_norm)  # 梯度裁剪
@@ -209,7 +251,10 @@ def train(teacher_model: list,student_model,train_dataloader, dev_dataloader, te
                 logging_loss = tr_loss
 
             if len(teacher_model) > 0 :
-                epoch_iterator.set_postfix(train_loss=loss.item(),ditill_loss=loss_t_s.item(),custom_loss=custom_loss)
+                if args.use_hidden_loss:
+                    epoch_iterator.set_postfix(train_loss=loss.item(),hidden_loss=hidden_loss_item,ditill_last_layer=loss_t_s.item(),custom_loss=custom_loss)
+                else:
+                    epoch_iterator.set_postfix(train_loss=loss.item(),ditill_loss=loss_t_s.item(),custom_loss=custom_loss)
             else:
                 epoch_iterator.set_postfix(train_loss=loss.item())
         
@@ -233,7 +278,7 @@ def train(teacher_model: list,student_model,train_dataloader, dev_dataloader, te
         if test_metric['micro-f1'] > test_bestscore:
             test_bestscore = test_metric['micro-f1']
             test_best_epoch = epoch
-            model_name = args.model_save_dir + "/entity_best.pt"
+            model_name = args.model_save_dir + "/pytorch_model.bin"
             model_to_save = (student_model.module if hasattr(student_model, "module") else student_model)
             torch.save(model_to_save.state_dict(), model_name)
 
@@ -274,7 +319,7 @@ if __name__ == "__main__":
     parser.add_argument('--model_save_dir', type=str, default='/opt/hyp/NER/Cysecurity_pretrain/fine-tune/distill_save_models/test/',
                         help='Root dir for saving models.')
     parser.add_argument('--teacher_model_path', type=str, 
-                        default='/opt/hyp/NER/Cysecurity_pretrain/fine-tune/save_models/cyber/bert_cys_epoch30_LR3e-5_BATCH_SIZE16',
+                        default='/opt/hyp/NER/Cysecurity_pretrain/fine-tune/save_models/cyber/bert_mlm_final_epoch_cys_epoch30_LR3e-5_BATCH_SIZE16',
                         help='Root dir for saving models.')
     parser.add_argument('--data_path', default='/opt/hyp/NER/NER-model/data/Cybersecurity/json_data', type=str,help='数据路径')
     parser.add_argument('--optimizer', default='Adam', choices=['Adam', 'SGD'], type=str)
@@ -295,12 +340,16 @@ if __name__ == "__main__":
     parser.add_argument('--loss_func', default='mse', type=str, help='mse/ce')
     parser.add_argument('--loss_func_alpha', default=1, type=float, help='蒸馏loss的权重')
     parser.add_argument('--use_distill', default=True, type=str2bool, help='是否使用蒸馏')
-    parser.add_argument('--few_bertlayer_num', default=3, type=int, help='BERT的层数')
+    parser.add_argument('--few_bertlayer_num', default=4, type=int, help='BERT的层数')
     parser.add_argument('--temperature', default=1, type=int, help='蒸馏temperature')
+    parser.add_argument('--use_hidden_loss', default=True, type=str2bool, help='使用BERT中间隐层进行蒸馏')
+    parser.add_argument('--loss_func_beta', default=1, type=float, help='蒸馏中间隐层loss的权重')
+    parser.add_argument('--hidden_loss_type', default=0, type=int, help='0-> hid_mse_loss, 1->patience_loss')
+    parser.add_argument('--use_multi_teacher', default=True, type=str2bool, help='多个teacher进行蒸馏')
 
     parser.add_argument("--learning_rate", default=5e-5, type=float, help="The initial learning rate for Adam.")
     parser.add_argument("--num_train_epochs", default=5, type=int, help="Total number of training epochs to perform.")
-    parser.add_argument('--batch_size', type=int, default=16, help='Training batch size.')
+    parser.add_argument('--batch_size', type=int, default=4, help='Training batch size.')
     parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--max_seq_length', default=200, type=int, help='Sequence max_length.')
@@ -368,12 +417,16 @@ if __name__ == "__main__":
     student_config = BertConfig.from_pretrained(args.model_name_or_path, num_labels=len(label2index))
     config = BertConfig.from_pretrained(args.model_name_or_path, num_labels=len(label2index))
 
+    if args.use_hidden_loss:
+        config.output_hidden_states = True
+        student_config.output_hidden_states = True
+
     print("Let's use", torch.cuda.device_count(), "GPUs!")
     train_logger.info("Let's use{}GPUS".format(torch.cuda.device_count()))
     tb_writer = SummaryWriter(args.tensorboard_dir)
 
+    student_config.num_hidden_layers = args.few_bertlayer_num 
     if args.do_train:
-        student_config.num_hidden_layers = args.few_bertlayer_num 
         student_model = FewLayerBertForNER.from_pretrained(args.model_name_or_path, config=student_config)
         if args.use_dataParallel:
             student_model = nn.DataParallel(student_model.cuda())
@@ -391,13 +444,21 @@ if __name__ == "__main__":
 
 
         teacher_model = []
+        teacher_model_path = [
+                '/opt/hyp/NER/Cysecurity_pretrain/fine-tune/save_models/cyber/bert_cys_epoch30_LR3e-5_BATCH_SIZE16',
+                '/opt/hyp/NER/Cysecurity_pretrain/fine-tune/save_models/cyber/bert_cys_epoch50_LR5e-5_BATCH_SIZE16'
+        ]
         if args.use_distill:
             t_model = FewLayerBertForNER.from_pretrained(args.teacher_model_path, config=config)
             teacher_model.append(t_model)
+            if args.use_multi_teacher:
+                for t_path in teacher_model_path:
+                    t_model_a = FewLayerBertForNER.from_pretrained(t_path, config=config)
+                    teacher_model.append(t_model_a)
+
         print('===============================开始训练================================')
         test_result,dev_result, lr, train_loss_step, train_loss_epoch, dev_loss_epoch = train(teacher_model,student_model, train_dataloader, 
                                                     dev_dataloader, test_dataloader,args, device, tb_writer, index2label, tag, train_logger)
-        
         with codecs.open(result_dir + '/dev_result.txt', 'w', encoding='utf-8') as f:
             json.dump(dev_result, f, indent=4, ensure_ascii=False)
 
@@ -424,7 +485,9 @@ if __name__ == "__main__":
     
     if args.do_test:
         print('=========================测试集==========================')
-        start_time = time.time()
+        test_dataset = load_and_cache_examples(test_data_raw, args, tokenizer, label2index, pad_token_label_id, 'test',train_logger)
+        test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size)
+        
         test_model = FewLayerBertForNER.from_pretrained(args.model_name_or_path, config=student_config)
         if args.use_dataParallel:
             test_model = nn.DataParallel(test_model.cuda())
@@ -434,8 +497,9 @@ if __name__ == "__main__":
         test_model.load_state_dict(torch.load(entity_model_save_dir))
         for param in test_model.parameters():
             param.requires_grad = False
+        
+        start_time = time.time()
         test_metric, y_pred = evaluate(test_dataloader, test_model, index2label, tag, args, train_logger, device, 'test',-1)
-
         end_time = time.time()
         print('预测Time Cost:{}s'.format(end_time - start_time))
         train_logger.info('预测Time Cost:{}s'.format(end_time - start_time))
